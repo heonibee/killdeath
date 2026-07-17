@@ -1,8 +1,8 @@
 """
 솔 인챈트 보스 컷/멍 체크 봇 (킬데스길드)
-- 보스별 컷/멍 기록 (누른 시각 + 누른 사람)
-- 실시간 현황판 (컷/멍 누르면 자동 갱신)
-- 00·03·09·12·21시 자동 리셋 (새 타임 시작)
+- 현황판을 여러 메시지로 나눠 설치, 각 메시지에 보스별 [🟢컷]/[🔴멍] 버튼(이름 표시)
+- 버튼 누르면 시각+누른 사람 기록, 해당 현황판 메시지 즉시 갱신
+- 00·03·09·12·21시 자동 리셋 (컷/멍 초기화, 로그는 보존)
 - 로그 계속 저장 (data.json)
 언어: 한국어 / discord.py 2.x
 """
@@ -18,16 +18,11 @@ from discord.ext import tasks
 
 from bosses import BOSSES, RESET_HOURS, boss_names, find_boss, tag_of
 
-# ---- 설정 ----
 KST = ZoneInfo("Asia/Seoul")
 DATA_FILE = "data.json"
-TOKEN = os.environ.get("DISCORD_TOKEN")  # 토큰은 환경변수로 (코드에 직접 X)
+TOKEN = os.environ.get("DISCORD_TOKEN")
+GROUP_SIZE = 5  # 한 메시지당 보스 수 (5마리=버튼10개=5줄, 디스코드 한도)
 
-# ---- 저장 데이터 ----
-# status: { 보스명: {"state": "컷"/"멍", "time": iso, "user": "닉네임"} }  (이번 타임)
-# board:  {"channel_id": int, "message_id": int}
-# slot:   현재 타임 시작 ISO 문자열
-# log:    [ {"ts": iso, "boss":..., "action":..., "user":..., "slot":...}, ... ]
 data = {"status": {}, "board": None, "slot": None, "log": []}
 
 
@@ -51,31 +46,35 @@ def save_data():
         print("save error:", e)
 
 
-# ---- 타임(슬롯) 계산 ----
-def slot_start(now: dt.datetime) -> dt.datetime:
-    """now가 속한 현재 타임의 시작 시각을 반환 (00·03·09·12·21 기준)."""
-    today_hours = sorted(RESET_HOURS)
-    candidates = []
-    for h in today_hours:
-        candidates.append(now.replace(hour=h, minute=0, second=0, microsecond=0))
-    # 오늘 것 중 now 이하인 가장 늦은 것
-    past = [c for c in candidates if c <= now]
-    if past:
-        return max(past)
-    # 오늘 리셋 전이면 어제 마지막(21시)
-    y = now - dt.timedelta(days=1)
-    return y.replace(hour=max(today_hours), minute=0, second=0, microsecond=0)
+def groups():
+    return [BOSSES[i:i + GROUP_SIZE] for i in range(0, len(BOSSES), GROUP_SIZE)]
 
 
-def slot_label(start: dt.datetime) -> str:
-    return start.strftime("%m/%d %H시 타임")
+def group_index_of(name):
+    for gi, g in enumerate(groups()):
+        if any(b["name"] == name for b in g):
+            return gi
+    return None
 
 
 def now_kst():
     return dt.datetime.now(KST)
 
 
-# ---- 현황판 임베드 ----
+def slot_start(now):
+    hrs = sorted(RESET_HOURS)
+    cands = [now.replace(hour=h, minute=0, second=0, microsecond=0) for h in hrs]
+    past = [c for c in cands if c <= now]
+    if past:
+        return max(past)
+    y = now - dt.timedelta(days=1)
+    return y.replace(hour=max(hrs), minute=0, second=0, microsecond=0)
+
+
+def slot_label(start):
+    return start.strftime("%m/%d %H시 타임")
+
+
 def status_line(b):
     st = data["status"].get(b["name"])
     tag = tag_of(b)
@@ -86,152 +85,95 @@ def status_line(b):
     t = dt.datetime.fromisoformat(st["time"]).astimezone(KST).strftime("%H:%M")
     if st["state"] == "컷":
         return f"🟢 {head} — 컷 ({t}, {st['user']})"
-    else:
-        return f"🔴 {head} — 멍 ({t}, {st['user']})"
+    return f"🔴 {head} — 멍 ({t}, {st['user']})"
 
 
-def build_embed():
+def group_embed(gi):
+    g = groups()[gi]
     start = dt.datetime.fromisoformat(data["slot"]) if data["slot"] else now_kst()
+    total = len(groups())
     e = discord.Embed(
-        title="🗡️ 킬데스길드 보스 현황판",
-        description=f"**{slot_label(start.astimezone(KST))}**  ·  컷/멍은 아래 메뉴에서 보스를 선택해 누르세요.",
+        title=f"🗡️ 킬데스길드 보스 현황판 ({gi + 1}/{total})",
+        description="\n".join(status_line(b) for b in g),
         color=0x2F5496,
     )
-    # 두 그룹으로 나눠 표시
-    timed = [b for b in BOSSES if not b.get("manual")]
-    manual = [b for b in BOSSES if b.get("manual")]
-    # 길이 제한(임베드 필드 1024자) 대비, 청크로 나눔
-    def chunk_field(title, bosses):
-        lines, buf = [], ""
-        idx = 1
-        for b in bosses:
-            ln = status_line(b) + "\n"
-            if len(buf) + len(ln) > 1000:
-                e.add_field(name=f"{title} ({idx})", value=buf, inline=False)
-                buf = ""
-                idx += 1
-            buf += ln
-        if buf:
-            nm = title if idx == 1 else f"{title} ({idx})"
-            e.add_field(name=nm, value=buf, inline=False)
-    chunk_field("정시 젠", timed)
-    chunk_field("확인요망 (12/24시간 등)", manual)
+    if gi == 0:
+        e.set_author(name=slot_label(start.astimezone(KST)))
     done = sum(1 for b in BOSSES if data["status"].get(b["name"]))
-    e.set_footer(text=f"기록됨 {done}/{len(BOSSES)}  ·  리셋: 00·03·09·12·21시  ·  /로그 로 기록 확인")
+    e.set_footer(text=f"기록 {done}/{len(BOSSES)} · 리셋 00·03·09·12·21시 · 아래 버튼으로 컷/멍")
     return e
 
 
-# ---- 컷/멍 기록 ----
 def record(boss_name, action, user):
     now = now_kst()
     data["status"][boss_name] = {"state": action, "time": now.isoformat(), "user": user}
     data["log"].append({
-        "ts": now.isoformat(),
-        "boss": boss_name,
-        "action": action,
-        "user": user,
-        "slot": data["slot"],
+        "ts": now.isoformat(), "boss": boss_name,
+        "action": action, "user": user, "slot": data["slot"],
     })
-    # 로그 과다 방지 (최근 5000개 유지)
     if len(data["log"]) > 5000:
         data["log"] = data["log"][-5000:]
     save_data()
 
 
-# ---- UI: 보스 선택 → 컷/멍 버튼 ----
-class CutMungView(discord.ui.View):
-    """보스 하나에 대한 컷/멍 버튼 (임시, ephemeral)"""
-    def __init__(self, boss_name):
-        super().__init__(timeout=60)
+class BossButton(discord.ui.Button):
+    def __init__(self, boss_name, action, row):
+        is_cut = (action == "컷")
+        super().__init__(
+            style=discord.ButtonStyle.success if is_cut else discord.ButtonStyle.danger,
+            label=("🟢 " if is_cut else "🔴 ") + boss_name,
+            custom_id=("c|" if is_cut else "m|") + boss_name,
+            row=row,
+        )
         self.boss_name = boss_name
-
-    @discord.ui.button(label="🟢 컷 (잡음)", style=discord.ButtonStyle.success)
-    async def cut(self, interaction: discord.Interaction, button: discord.ui.Button):
-        record(self.boss_name, "컷", interaction.user.display_name)
-        await refresh_board(interaction.client)
-        await interaction.response.edit_message(
-            content=f"✅ **{self.boss_name}** 컷 기록됨 ({now_kst().strftime('%H:%M')}, {interaction.user.display_name})",
-            view=None,
-        )
-
-    @discord.ui.button(label="🔴 멍 (안 뜸)", style=discord.ButtonStyle.danger)
-    async def mung(self, interaction: discord.Interaction, button: discord.ui.Button):
-        record(self.boss_name, "멍", interaction.user.display_name)
-        await refresh_board(interaction.client)
-        await interaction.response.edit_message(
-            content=f"✅ **{self.boss_name}** 멍 기록됨 ({now_kst().strftime('%H:%M')}, {interaction.user.display_name})",
-            view=None,
-        )
-
-    @discord.ui.button(label="↩ 취소(대기로)", style=discord.ButtonStyle.secondary)
-    async def clear(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data["status"].pop(self.boss_name, None)
-        save_data()
-        await refresh_board(interaction.client)
-        await interaction.response.edit_message(
-            content=f"↩ **{self.boss_name}** 대기 상태로 되돌림", view=None
-        )
-
-
-class BossSelect(discord.ui.Select):
-    def __init__(self, bosses, placeholder, custom_id):
-        options = [
-            discord.SelectOption(
-                label=b["name"],
-                value=b["name"],
-                description=f"{b['map']}. {b['loc']}" + (f" · {tag_of(b)}" if tag_of(b) else ""),
-            )
-            for b in bosses[:25]
-        ]
-        super().__init__(placeholder=placeholder, options=options, custom_id=custom_id, min_values=1, max_values=1)
+        self.action = action
 
     async def callback(self, interaction: discord.Interaction):
-        boss = self.values[0]
-        await interaction.response.send_message(
-            content=f"**{boss}** — 어떻게 기록할까요?",
-            view=CutMungView(boss),
-            ephemeral=True,
-        )
+        record(self.boss_name, self.action, interaction.user.display_name)
+        gi = group_index_of(self.boss_name)
+        await interaction.response.edit_message(embed=group_embed(gi), view=GroupView(gi))
 
 
-class BoardView(discord.ui.View):
-    """현황판에 붙는 영구 뷰 (보스 선택 메뉴)"""
-    def __init__(self):
+class GroupView(discord.ui.View):
+    def __init__(self, gi):
         super().__init__(timeout=None)
-        timed = [b for b in BOSSES if not b.get("manual")]
-        manual = [b for b in BOSSES if b.get("manual")]
-        self.add_item(BossSelect(timed, "정시 젠 보스 선택…", "sel_timed"))
-        if manual:
-            self.add_item(BossSelect(manual, "확인요망 보스 선택…", "sel_manual"))
+        for i, b in enumerate(groups()[gi]):
+            self.add_item(BossButton(b["name"], "컷", row=i))
+            self.add_item(BossButton(b["name"], "멍", row=i))
 
 
-# ---- 현황판 갱신 ----
-async def refresh_board(client):
+async def refresh_group(client, gi):
     b = data.get("board")
-    if not b:
+    if not b or gi is None or gi >= len(b.get("messages", [])):
         return
+    mid = b["messages"][gi]
     try:
         ch = client.get_channel(b["channel_id"]) or await client.fetch_channel(b["channel_id"])
-        msg = await ch.fetch_message(b["message_id"])
-        await msg.edit(embed=build_embed(), view=BoardView())
+        msg = await ch.fetch_message(mid)
+        await msg.edit(embed=group_embed(gi), view=GroupView(gi))
     except Exception as e:
-        print("board refresh error:", e)
+        print(f"group {gi} refresh error:", e)
 
 
-# ---- 봇 본체 ----
+async def refresh_all(client):
+    if not data.get("board"):
+        return
+    for gi in range(len(groups())):
+        await refresh_group(client, gi)
+
+
 class BossBot(discord.Client):
     def __init__(self):
-        intents = discord.Intents.default()
-        super().__init__(intents=intents)
+        super().__init__(intents=discord.Intents.default())
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        self.add_view(BoardView())  # 영구 뷰 등록 (재시작 후에도 메뉴 작동)
+        for gi in range(len(groups())):
+            self.add_view(GroupView(gi))
         await self.tree.sync()
         self.reset_checker.start()
 
     async def on_ready(self):
-        # 시작 시 현재 슬롯 확정
         cur = slot_start(now_kst()).isoformat()
         if data.get("slot") != cur:
             data["slot"] = cur
@@ -241,13 +183,12 @@ class BossBot(discord.Client):
 
     @tasks.loop(seconds=20)
     async def reset_checker(self):
-        """타임 경계를 넘으면 현황판 리셋."""
         cur = slot_start(now_kst()).isoformat()
         if data.get("slot") != cur:
             data["slot"] = cur
-            data["status"] = {}   # 새 타임 → 컷/멍 초기화 (로그는 유지)
+            data["status"] = {}
             save_data()
-            await refresh_board(self)
+            await refresh_all(self)
             print("타임 리셋:", cur)
 
     @reset_checker.before_loop
@@ -258,8 +199,7 @@ class BossBot(discord.Client):
 client = BossBot()
 
 
-# ---- 슬래시 명령어 ----
-async def boss_autocomplete(interaction: discord.Interaction, current: str):
+async def boss_autocomplete(interaction, current):
     cur = current.replace(" ", "")
     out = []
     for n in boss_names():
@@ -270,16 +210,23 @@ async def boss_autocomplete(interaction: discord.Interaction, current: str):
     return out
 
 
-@client.tree.command(name="현황판", description="이 채널에 보스 현황판을 설치합니다.")
+@client.tree.command(name="현황판", description="이 채널에 보스 현황판(버튼)을 설치합니다.")
 async def cmd_board(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=build_embed(), view=BoardView())
-    msg = await interaction.original_response()
-    data["board"] = {"channel_id": msg.channel.id, "message_id": msg.id}
+    await interaction.response.send_message("현황판을 설치하는 중…", ephemeral=True)
+    ch = interaction.channel
+    msg_ids = []
+    for gi in range(len(groups())):
+        m = await ch.send(embed=group_embed(gi), view=GroupView(gi))
+        msg_ids.append(m.id)
+    data["board"] = {"channel_id": ch.id, "messages": msg_ids}
     save_data()
     try:
-        await msg.pin()
+        first = await ch.fetch_message(msg_ids[0])
+        await first.pin()
     except Exception:
         pass
+    await interaction.edit_original_response(
+        content=f"✅ 현황판 설치 완료 ({len(msg_ids)}개 메시지). 버튼으로 컷/멍을 체크하세요.")
 
 
 @client.tree.command(name="컷", description="보스 컷(잡음)을 기록합니다.")
@@ -290,11 +237,9 @@ async def cmd_cut(interaction: discord.Interaction, 보스: str):
         await interaction.response.send_message("그런 보스가 없어요.", ephemeral=True)
         return
     record(보스, "컷", interaction.user.display_name)
-    await refresh_board(interaction.client)
     await interaction.response.send_message(
-        f"🟢 **{보스}** 컷 기록 ({now_kst().strftime('%H:%M')}, {interaction.user.display_name})",
-        ephemeral=True,
-    )
+        f"🟢 **{보스}** 컷 기록 ({now_kst().strftime('%H:%M')}, {interaction.user.display_name})", ephemeral=True)
+    await refresh_group(interaction.client, group_index_of(보스))
 
 
 @client.tree.command(name="멍", description="보스 멍(안 뜸)을 기록합니다.")
@@ -305,11 +250,9 @@ async def cmd_mung(interaction: discord.Interaction, 보스: str):
         await interaction.response.send_message("그런 보스가 없어요.", ephemeral=True)
         return
     record(보스, "멍", interaction.user.display_name)
-    await refresh_board(interaction.client)
     await interaction.response.send_message(
-        f"🔴 **{보스}** 멍 기록 ({now_kst().strftime('%H:%M')}, {interaction.user.display_name})",
-        ephemeral=True,
-    )
+        f"🔴 **{보스}** 멍 기록 ({now_kst().strftime('%H:%M')}, {interaction.user.display_name})", ephemeral=True)
+    await refresh_group(interaction.client, group_index_of(보스))
 
 
 @client.tree.command(name="로그", description="최근 컷/멍 기록을 봅니다.")
@@ -331,12 +274,12 @@ async def cmd_log(interaction: discord.Interaction, 보스: str = None):
     await interaction.response.send_message("```\n" + "\n".join(lines) + "\n```", ephemeral=True)
 
 
-@client.tree.command(name="리셋", description="현재 타임의 컷/멍을 수동으로 초기화합니다.")
+@client.tree.command(name="리셋", description="현재 타임의 컷/멍을 수동 초기화합니다.")
 async def cmd_reset(interaction: discord.Interaction):
     data["status"] = {}
     save_data()
-    await refresh_board(interaction.client)
-    await interaction.response.send_message("현황판을 초기화했어요. (로그는 유지)", ephemeral=True)
+    await interaction.response.send_message("현황판을 초기화했어요. (로그 유지)", ephemeral=True)
+    await refresh_all(interaction.client)
 
 
 def main():
