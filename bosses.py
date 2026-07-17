@@ -1,6 +1,6 @@
 # 솔 인챈트 보스 목록 (킬데스길드)
-# manual=True 인 보스는 정시 젠이 아님(12/24시간 등) — 표기만 다르고 컷/멍은 동일하게 동작
-# 표시 순서 = 이 리스트 순서 (드랍표/잡는 순서)
+# manual 이 있으면 정시 젠 아님(처치 후 12/24시간 등) — 매 타임 항상 포함
+# 표시 순서 = 이 리스트 순서
 
 BOSSES = [
     {"name": "만드라고라",      "map": "8",       "loc": "포도밭",           "hours": [3, 9, 12, 21, 0], "prob": 100},
@@ -32,8 +32,7 @@ BOSSES = [
     {"name": "나태의 데스웜",   "map": "신의탑2층", "loc": "신의탑 2층",       "manual": "확인요망"},
 ]
 
-# 현황판 리셋 시각 (매일 이 시각에 새 타임 시작)
-RESET_HOURS = [0, 3, 9, 12, 21]
+RESET_HOURS = [0, 3, 9, 12, 21]  # 정시 타임(젠 시각)
 
 def boss_names():
     return [b["name"] for b in BOSSES]
@@ -45,9 +44,20 @@ def find_boss(name):
     return None
 
 def tag_of(b):
-    """보스 종류 태그: '50%' / '12시간 젠' 등 / '' """
     if b.get("manual"):
         return b["manual"]
     if b.get("prob") == 50:
         return "50%"
     return ""
+
+def bosses_for_hour(h):
+    """해당 정시 타임에 표시할 보스: 그 시각 정시 젠 + 확인요망(항상)."""
+    out = []
+    for b in BOSSES:
+        if b.get("manual"):
+            out.append(b)
+        elif h in b.get("hours", []):
+            out.append(b)
+    # 리스트 원래 순서 유지
+    order = {id(b): i for i, b in enumerate(BOSSES)}
+    return sorted(out, key=lambda b: order[id(b)])
