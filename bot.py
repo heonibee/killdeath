@@ -189,7 +189,18 @@ async def refresh_posts_with_boss(client, boss_name):
 
 
 # ---- 타임 자동 표시 ----
+def upcoming_slot_start(hour, now):
+    t = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if t <= now:
+        t += dt.timedelta(days=1)
+    return t
+
+
 async def post_timeslot(channel, hour):
+    # 새 타임 표시 시 컷/멍 초기화 (이전 체크가 딸려오지 않게) — 로그는 보존
+    data["status"] = {}
+    data["slot"] = upcoming_slot_start(hour, now_kst()).isoformat()
+    save_data()
     bosses = bosses_for_hour(hour)
     # 1) 참석 메시지
     am = await channel.send(embed=attend_embed(hour, {}))
@@ -222,23 +233,15 @@ class BossBot(discord.Client):
         self.scheduler.start()
 
     async def on_ready(self):
-        cur = slot_start(now_kst()).isoformat()
-        if data.get("slot") != cur:
-            data["slot"] = cur
-            data["status"] = {}
+        if not data.get("slot"):
+            data["slot"] = slot_start(now_kst()).isoformat()
             save_data()
         print(f"로그인: {self.user} | 현재 타임: {data['slot']}")
 
     @tasks.loop(seconds=20)
     async def scheduler(self):
         now = now_kst()
-        # (1) 타임 리셋
-        cur = slot_start(now).isoformat()
-        if data.get("slot") != cur:
-            data["slot"] = cur
-            data["status"] = {}
-            save_data()
-        # (2) 젠 10분 전 자동 표시
+        # 젠 10분 전 자동 표시 (컷/멍 초기화는 post_timeslot 안에서 처리)
         if data.get("auto_channel"):
             for h in RESET_HOURS:
                 pre = (now.replace(hour=h, minute=0, second=0, microsecond=0)
