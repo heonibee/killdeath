@@ -82,9 +82,16 @@ def status_line(b):
     head = f"`{b['map']}` **{b['name']}**{tagtxt}"
     if not st:
         return f"⬜ {head} — 대기"
-    t = dt.datetime.fromisoformat(st["time"]).astimezone(KST).strftime("%H:%M")
-    emo = {"컷": "⚔️", "뜸": "🟢", "멍": "🔴"}.get(st["state"], "⬜")
-    return f"{emo} {head} — {st['state']} ({t}, {st['user']})"
+    parts = []
+    if st.get("cut"):
+        parts.append("⚔️ 컷")
+    if st.get("state") in ("뜸", "멍"):
+        emo = "🟢" if st["state"] == "뜸" else "🔴"
+        t = dt.datetime.fromisoformat(st["time"]).astimezone(KST).strftime("%H:%M")
+        parts.append(f"{emo} {st['state']} ({t}, {st['user']})")
+    if not parts:
+        return f"⬜ {head} — 대기"
+    return f"{head} — " + ", ".join(parts)
 
 
 def button_embed(bosses, part=None, total=None):
@@ -116,9 +123,14 @@ def attend_embed(hour, users):
 
 def record(boss_name, action, user):
     now = now_kst()
-    # 뜸/멍만 화면 상태로 저장(누른 사람 표시). 컷은 상태를 바꾸지 않고 로그에만 남김.
-    if action in ("뜸", "멍"):
-        data["status"][boss_name] = {"state": action, "time": now.isoformat(), "user": user}
+    cur = data["status"].get(boss_name, {})
+    if action == "컷":
+        cur["cut"] = True  # 컷은 별도 표시(이름 없이), 뜸/멍과 공존
+    else:  # 뜸 / 멍 — 서로 배타적, 시각·이름 저장
+        cur["state"] = action
+        cur["time"] = now.isoformat()
+        cur["user"] = user
+    data["status"][boss_name] = cur
     data["log"].append({"ts": now.isoformat(), "boss": boss_name,
                         "action": action, "user": user, "slot": data["slot"]})
     if len(data["log"]) > 5000:
