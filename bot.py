@@ -80,18 +80,14 @@ def status_line(b):
     tag = tag_of(b)
     tagtxt = f" `{tag}`" if tag else ""
     head = f"`{b['map']}` **{b['name']}**{tagtxt}"
-    if not st:
+    if not st or not st.get("state"):
         return f"⬜ {head} — 대기"
-    parts = []
-    if st.get("cut"):
-        parts.append("⚔️ 컷")
-    if st.get("state") in ("뜸", "멍"):
-        emo = "🟢" if st["state"] == "뜸" else "🔴"
+    emo = {"컷": "⚔️", "뜸": "🟢", "멍": "🔴"}.get(st["state"], "⬜")
+    # 뜸/멍을 본 사람 이름은 컷을 눌러도 유지
+    if st.get("user") and st.get("time"):
         t = dt.datetime.fromisoformat(st["time"]).astimezone(KST).strftime("%H:%M")
-        parts.append(f"{emo} {st['state']} ({t}, {st['user']})")
-    if not parts:
-        return f"⬜ {head} — 대기"
-    return f"{head} — " + ", ".join(parts)
+        return f"{emo} {head} — {st['state']} ({t}, {st['user']})"
+    return f"{emo} {head} — {st['state']}"
 
 
 def button_embed(bosses, part=None, total=None):
@@ -124,12 +120,12 @@ def attend_embed(hour, users):
 def record(boss_name, action, user):
     now = now_kst()
     cur = data["status"].get(boss_name, {})
-    if action == "컷":
-        cur["cut"] = True  # 컷은 별도 표시(이름 없이), 뜸/멍과 공존
-    else:  # 뜸 / 멍 — 서로 배타적, 시각·이름 저장
-        cur["state"] = action
+    cur["state"] = action  # 컷/뜸/멍 배타적 — 마지막 누른 것이 이모지
+    if action in ("뜸", "멍"):
+        # 뜸/멍은 누가 봤는지 기록(시각·이름 갱신)
         cur["time"] = now.isoformat()
         cur["user"] = user
+    # 컷은 이모지만 바꾸고 기존 뜸/멍 이름은 그대로 유지
     data["status"][boss_name] = cur
     data["log"].append({"ts": now.isoformat(), "boss": boss_name,
                         "action": action, "user": user, "slot": data["slot"]})
