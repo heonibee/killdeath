@@ -83,7 +83,8 @@ def status_line(b):
     if not st:
         return f"⬜ {head} — 대기"
     t = dt.datetime.fromisoformat(st["time"]).astimezone(KST).strftime("%H:%M")
-    return f"{'🟢' if st['state']=='컷' else '🔴'} {head} — {st['state']} ({t}, {st['user']})"
+    emo = {"컷": "⚔️", "뜸": "🟢", "멍": "🔴"}.get(st["state"], "⬜")
+    return f"{emo} {head} — {st['state']} ({t}, {st['user']})"
 
 
 def button_embed(bosses, part=None, total=None):
@@ -95,7 +96,7 @@ def button_embed(bosses, part=None, total=None):
         description="\n".join(status_line(b) for b in bosses),
         color=0x2F5496,
     )
-    e.set_footer(text="아래 버튼으로 컷/멍 · 리셋 00·03·09·12·21시")
+    e.set_footer(text="⚔️컷 🟢뜸 🔴멍 · 리셋은 타임 표시 때")
     return e
 
 
@@ -123,14 +124,23 @@ def record(boss_name, action, user):
     save_data()
 
 
-# ---- 컷/멍 버튼 ----
+# ---- 컷/뜸/멍 버튼 ----
+# ⚔️ 컷(잡음) / 🟢 뜸(떠있음) / 🔴 멍(안뜸)
+ACTIONS = [
+    ("컷", "⚔️", discord.ButtonStyle.secondary),
+    ("뜸", "🟢", discord.ButtonStyle.success),
+    ("멍", "🔴", discord.ButtonStyle.danger),
+]
+ACODE = {"컷": "c", "뜸": "s", "멍": "m"}
+ACODE_REV = {v: k for k, v in ACODE.items()}
+
+
 class BossButton(discord.ui.Button):
-    def __init__(self, boss_name, action, row):
-        is_cut = (action == "컷")
+    def __init__(self, boss_name, action, emoji, style, row, show_name):
         super().__init__(
-            style=discord.ButtonStyle.success if is_cut else discord.ButtonStyle.danger,
-            label=("🟢 " if is_cut else "🔴 ") + boss_name,
-            custom_id=("c|" if is_cut else "m|") + boss_name,
+            style=style,
+            label=(f"{emoji} {boss_name}" if show_name else emoji),
+            custom_id=f"{ACODE[action]}|{boss_name}",
             row=row,
         )
         self.boss_name = boss_name
@@ -145,18 +155,22 @@ class BossButton(discord.ui.Button):
             embed=button_embed(bosses), view=make_button_view(names))
 
 
+def _add_boss_row(view, name, row):
+    for i, (action, emoji, style) in enumerate(ACTIONS):
+        view.add_item(BossButton(name, action, emoji, style, row=row, show_name=(i == 0)))
+
+
 def make_button_view(names):
     v = discord.ui.View(timeout=None)
     for i, n in enumerate(names[:GROUP_SIZE]):
-        v.add_item(BossButton(n, "컷", row=i))
-        v.add_item(BossButton(n, "멍", row=i))
+        _add_boss_row(v, n, row=i)
     return v
 
 
 def _all_boss_chunks():
-    """영구 뷰 등록용: 전체 보스를 12마리(24버튼)씩 나눠 등록."""
+    """영구 뷰 등록용: 전체 보스를 8마리(24버튼)씩 나눠 등록."""
     names = boss_names()
-    return [names[i:i + 12] for i in range(0, len(names), 12)]
+    return [names[i:i + 8] for i in range(0, len(names), 8)]
 
 
 class RegistryView(discord.ui.View):
@@ -164,8 +178,8 @@ class RegistryView(discord.ui.View):
     def __init__(self, names):
         super().__init__(timeout=None)
         for n in names:
-            self.add_item(BossButton(n, "컷", row=None))
-            self.add_item(BossButton(n, "멍", row=None))
+            for i, (action, emoji, style) in enumerate(ACTIONS):
+                self.add_item(BossButton(n, action, emoji, style, row=None, show_name=(i == 0)))
 
 
 # ---- 현황 갱신 ----
@@ -329,30 +343,36 @@ async def cmd_now(interaction: discord.Interaction, 시: int = None):
     await post_timeslot(interaction.channel, h)
 
 
+async def _do_record(interaction, 보스, action, emoji):
+    if not find_boss(보스):
+        await interaction.response.send_message("그런 보스가 없어요.", ephemeral=True)
+        return
+    record(보스, action, interaction.user.display_name)
+    await interaction.response.send_message(
+        f"{emoji} **{보스}** {action} ({now_kst().strftime('%H:%M')}, {interaction.user.display_name})",
+        ephemeral=True)
+    await refresh_posts_with_boss(interaction.client, 보스)
+
+
 @client.tree.command(name="컷", description="보스 컷(잡음) 기록")
 @app_commands.describe(보스="보스 이름")
 @app_commands.autocomplete(보스=boss_autocomplete)
 async def cmd_cut(interaction: discord.Interaction, 보스: str):
-    if not find_boss(보스):
-        await interaction.response.send_message("그런 보스가 없어요.", ephemeral=True)
-        return
-    record(보스, "컷", interaction.user.display_name)
-    await interaction.response.send_message(
-        f"🟢 **{보스}** 컷 ({now_kst().strftime('%H:%M')}, {interaction.user.display_name})", ephemeral=True)
-    await refresh_posts_with_boss(interaction.client, 보스)
+    await _do_record(interaction, 보스, "컷", "⚔️")
+
+
+@client.tree.command(name="뜸", description="보스 뜸(떠 있음, 아직 안 잡음) 기록")
+@app_commands.describe(보스="보스 이름")
+@app_commands.autocomplete(보스=boss_autocomplete)
+async def cmd_spawn(interaction: discord.Interaction, 보스: str):
+    await _do_record(interaction, 보스, "뜸", "🟢")
 
 
 @client.tree.command(name="멍", description="보스 멍(안 뜸) 기록")
 @app_commands.describe(보스="보스 이름")
 @app_commands.autocomplete(보스=boss_autocomplete)
 async def cmd_mung(interaction: discord.Interaction, 보스: str):
-    if not find_boss(보스):
-        await interaction.response.send_message("그런 보스가 없어요.", ephemeral=True)
-        return
-    record(보스, "멍", interaction.user.display_name)
-    await interaction.response.send_message(
-        f"🔴 **{보스}** 멍 ({now_kst().strftime('%H:%M')}, {interaction.user.display_name})", ephemeral=True)
-    await refresh_posts_with_boss(interaction.client, 보스)
+    await _do_record(interaction, 보스, "멍", "🔴")
 
 
 @client.tree.command(name="로그", description="최근 컷/멍 기록")
@@ -369,7 +389,7 @@ async def cmd_log(interaction: discord.Interaction, 보스: str = None):
     lines = []
     for l in logs:
         t = dt.datetime.fromisoformat(l["ts"]).astimezone(KST).strftime("%m/%d %H:%M")
-        emo = "🟢" if l["action"] == "컷" else "🔴"
+        emo = {"컷": "⚔️", "뜸": "🟢", "멍": "🔴"}.get(l["action"], "⬜")
         lines.append(f"{emo} {t}  {l['boss']}  {l['action']} — {l['user']}")
     await interaction.response.send_message("```\n" + "\n".join(lines) + "\n```", ephemeral=True)
 
