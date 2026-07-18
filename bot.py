@@ -116,7 +116,9 @@ def attend_embed(hour, users):
 
 def record(boss_name, action, user):
     now = now_kst()
-    data["status"][boss_name] = {"state": action, "time": now.isoformat(), "user": user}
+    # 뜸/멍만 화면 상태로 저장(누른 사람 표시). 컷은 상태를 바꾸지 않고 로그에만 남김.
+    if action in ("뜸", "멍"):
+        data["status"][boss_name] = {"state": action, "time": now.isoformat(), "user": user}
     data["log"].append({"ts": now.isoformat(), "boss": boss_name,
                         "action": action, "user": user, "slot": data["slot"]})
     if len(data["log"]) > 5000:
